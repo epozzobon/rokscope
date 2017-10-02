@@ -10,8 +10,8 @@ void assert_sr(int ret, const char *string) {
 }
 
 
-const char *configkey_tostring(uint16_t option) {
-	const char *option_name = NULL;
+const char *configkey_tostring(uint32_t option) {
+	const char *option_name;
 	switch (option) {
 		case 10000: option_name = "Logic Analyzer"; break;
 		case 10001: option_name = "Oscilloscope"; break;
@@ -22,6 +22,7 @@ const char *configkey_tostring(uint16_t option) {
 		case 30017: option_name = "Number of Vertical Divisions"; break;
 		case 50000: option_name = "Sample Time Limit (ms)"; break;
 		case 50001: option_name = "Sample Number Limit"; break;
+		default: option_name = NULL;
 	}
 	return option_name;
 }
@@ -63,7 +64,7 @@ struct sr_channel_group* get_device_channel_group(struct sr_dev_inst *dev) {
 }
 
 
-struct sr_channel** get_device_channels(struct sr_dev_inst *dev) {
+struct sr_channel** get_device_channels(struct sr_dev_inst *dev, int *num) {
 	GSList *ch_list;
 	struct sr_channel **channels;
 	if ((ch_list = sr_dev_inst_channels_get(dev)) == NULL) {
@@ -83,11 +84,13 @@ struct sr_channel** get_device_channels(struct sr_dev_inst *dev) {
 		assert_sr( sr_dev_channel_enable(channel, TRUE), "enabling channel");
 	}
 	channels[ch_count] = NULL;
+	num[0] = ch_count;
 	return channels;
 }
 
 
-struct sr_dev_driver *get_hantek_6xxx_driver(struct sr_context *sr_ctx) {
+struct sr_dev_driver *get_driver(const char *driver_name,
+		struct sr_context *sr_ctx) {
 	struct sr_dev_driver** drivers;
 	struct sr_dev_driver* driver = NULL;
 	drivers = sr_driver_list(sr_ctx);
@@ -99,7 +102,7 @@ struct sr_dev_driver *get_hantek_6xxx_driver(struct sr_context *sr_ctx) {
 
 	for (int i = 0; drivers[i] != NULL; i++) {
 		driver = drivers[i];
-		if (0 == strcmp(driver->name, "hantek-6xxx")) {
+		if (0 == strcmp(driver->name, driver_name)) {
 			int r = sr_driver_init(sr_ctx, driver);
 			if (r != SR_OK) {
 				fprintf(stderr, "Error initializing driver!\n");
@@ -110,13 +113,13 @@ struct sr_dev_driver *get_hantek_6xxx_driver(struct sr_context *sr_ctx) {
 			return driver;
 		}
 	}
-	fprintf(stderr, "hantek_6xxx driver not found!\n");
+	fprintf(stderr, "%s driver not found!\n", driver_name);
 	exit(1);
 	return NULL;
 }
 
 
-struct sr_dev_inst *get_hantek_6xxx_device(struct sr_dev_driver *driver) {
+struct sr_dev_inst *get_device(struct sr_dev_driver *driver) {
 	GSList* dev_list = sr_driver_scan(driver, NULL);
 	if (dev_list == NULL) {
 		fprintf(stderr, "No devices found\n");
@@ -132,11 +135,40 @@ struct sr_dev_inst *get_hantek_6xxx_device(struct sr_dev_driver *driver) {
 }
 
 
+struct state reset_positions(struct state *s) {
+	for (int i = 0; i < (*s).num_channels; i++) {
+		(*s).positions[i] = 0;
+	}
+	return (*s);
+}
+
+
+
 void on_session_stopped(void *data) {
 	struct state *s = data;
 	s->buff_idx++;
 	if (s->running)
 		assert_sr( sr_session_start(s->session), "starting session");
+	reset_positions(s);
+}
+
+
+int get_datafeed_analog_channel(const struct sr_datafeed_analog *payload) {
+	GSList *channels;
+	struct sr_channel *channel;
+
+	channels = payload->meaning->channels;
+	if (channels == NULL) {
+		fprintf(stderr, "Channels is null?\n");
+		exit(1);
+	}
+	if (channels->next != NULL) {
+		fprintf(stderr, "Channels is > 1?\n");
+		exit(1);
+	}
+	channel = channels->data;
+	int c = channel->index;
+	return c;
 }
 
 
@@ -155,22 +187,35 @@ void on_session_datafeed(const struct sr_dev_inst *dev,
 			UNUSED(payload);
 		} break;
 
-		case SR_DF_END: {
-		} break;
-
 		case SR_DF_ANALOG: {
 			const struct sr_datafeed_analog *payload;
-			payload = packet->payload;
-			float *payload_data = payload->data;
+			float *payload_data;
 
-			GLfloat *vert_data = s->gloscope->vert_data;
-			int size = payload->num_samples;
-			if (size > s->gloscope->num_samples)
-				size = s->gloscope->num_samples;
-			for (int i = 0; i < size; i++) {
-				vert_data[i] = payload_data[i];
+			if (s->gloscope->ready) {
+				payload = packet->payload;
+				payload_data = payload->data;
+
+				int c = get_datafeed_analog_channel(payload);
+				int buff_pos = s->positions[c];
+
+				int payload_count = payload->num_samples;
+				int plot_count = s->gloscope->num_samples;
+				int plot_free = plot_count - buff_pos;
+				int copy_count = payload_count > plot_free ? plot_free : payload_count;
+				size_t copy_size = copy_count * sizeof(sample_t);
+
+				sample_t *vert_data = s->gloscope->vert_data[c];
+
+				memcpy(&vert_data[buff_pos], payload_data, copy_size);
+				s->positions[c] = buff_pos + copy_count;
+
+				s->gloscope->start_idx = 0;
+				s->gloscope->stop_idx = plot_count-1;
 			}
 		} break;
+
+		case SR_DF_LOGIC: break; // Skip this, we only want analog
+		case SR_DF_END: break;
 
 		default:
 			printf("unknown datafeed type %d\n", type);
@@ -216,12 +261,14 @@ void on_stdin_read(GObject *src, GAsyncResult *res, void *data) {
 void *start_render_thread(void *data) {
 	struct state *s = data;
 	
-	struct gloscope_context ctx;
-	gloscope_init(&ctx);
-	s->gloscope = &ctx;
+	struct gloscope_context *ctx;
+	ctx = malloc(sizeof(*ctx));
+	s->gloscope = ctx;
+	ctx->ready = 0;
+	gloscope_init(s->gloscope, s->num_channels, 4096);
 	int e;
 	do {
-		e = gloscope_render(&ctx);
+		e = gloscope_render(ctx);
 	} while (!e);
 
 	exit(0);
@@ -241,8 +288,6 @@ int main(int argc, char **argv) {
 	GMainLoop *main_loop;
 	main_loop = g_main_loop_new(NULL, FALSE);
 
-	s.rthread = g_thread_new("renderer", start_render_thread, &s);
-
 	GInputStream *input;
 	input = g_unix_input_stream_new(0, FALSE);
 	g_input_stream_read_async(input, s.stdin_buff, 80, G_PRIORITY_DEFAULT,
@@ -251,23 +296,25 @@ int main(int argc, char **argv) {
 	s.context = NULL;
 	assert_sr( sr_init(&s.context), "initializing libsigrok");
 
-	s.driver = get_hantek_6xxx_driver(s.context);
+	s.driver = get_driver("hantek-6xxx", s.context);
+	//s.driver = get_driver("demo", s.context);
 	enumerate_device_options("Driver", s.driver, NULL, NULL);
 
-	s.device = get_hantek_6xxx_device(s.driver);
+	s.device = get_device(s.driver);
 	enumerate_device_options("Device", s.driver, s.device, NULL);
 	assert_sr( sr_dev_open(s.device), "opening device");
 
 	s.chgroup = get_device_channel_group(s.device);
 	enumerate_device_options("Channel group", s.driver, s.device, s.chgroup);
-	s.channels = get_device_channels(s.device);
+	s.channels = get_device_channels(s.device, &s.num_channels);
+	s.positions = notnull( malloc(s.num_channels * sizeof(int)) );
+	s = reset_positions(&s);
 
-	cmd_set_samplerate(&s, 100000);
-	cmd_set_sampleslimit(&s, 1024*16);
+	cmd_set_samplerate(&s, 1000000);
+	cmd_set_sampleslimit(&s, 4096);
 
 	s.session = NULL;
-	assert_sr( sr_session_new(s.context, &s.session),
-			"creating session");
+	assert_sr( sr_session_new(s.context, &s.session), "creating session");
 	assert_sr( sr_session_dev_add(s.session, s.device),
 			"adding device to session");
 
@@ -276,6 +323,8 @@ int main(int argc, char **argv) {
 
 	ret = sr_session_stopped_callback_set(s.session, on_session_stopped, &s);
 	assert_sr( ret, "setting callback for session stopped");
+
+	s.rthread = g_thread_new("renderer", start_render_thread, &s);
 
 	s.running = TRUE;
 	assert_sr( sr_session_start(s.session), "starting session");

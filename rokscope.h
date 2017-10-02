@@ -19,6 +19,8 @@ struct state {
 	struct sr_dev_inst *device;
 	struct sr_session *session;
 	struct sr_channel **channels;
+	int *positions;
+	int num_channels;
 	struct sr_channel_group *chgroup;
 	struct gloscope_context *gloscope;
 };
@@ -30,4 +32,3 @@ void cmd_set_samplerate(state_t *, uint64_t);
 void cmd_set_sampleslimit(state_t *, uint64_t);
 void cmd_set_running(state_t *, uint64_t);
 void assert_sr(int, const char *);
-

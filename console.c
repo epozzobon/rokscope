@@ -4,8 +4,10 @@
 void cmd_set_samplerate(struct state *s, uint64_t samplerate) {
 	gboolean running = s->running;
 	s->running = FALSE;
-	if (running)
-	assert_sr( sr_session_run(s->session) , "running session");
+	if (running) {
+		assert_sr(sr_session_stop(s->session), "stopping session");
+		assert_sr(sr_session_run(s->session), "running session");
+	}
 	GVariant *gvar;
 	int ret;
 	gvar = g_variant_new_uint64(samplerate);
@@ -27,10 +29,11 @@ void cmd_set_sampleslimit(struct state *s, uint64_t sampleslimit) {
 
 
 void cmd_set_running(struct state *s, uint64_t running) {
-	s->running = running;
+	s->running = running > 0;
 	if (running) {
 		assert_sr( sr_session_start(s->session), "starting session");
 	} else {
+		assert_sr( sr_session_stop(s->session), "stopping session");
 		assert_sr( sr_session_run(s->session), "ending session");
 	}
 }
@@ -46,13 +49,13 @@ char *garray_getstr(GArray *words, guint idx) {
 }
 
 
-gboolean garray_strtoull(GArray *words, int idx, uint64_t *out) {
+gboolean garray_strtoull(GArray *words, guint idx, int64_t *out) {
 	char *word = garray_getstr(words, idx);
 	if (word[0] == 0)
 		return FALSE;
 	char *endptr;
 	errno = 0;
-	uint64_t arg = strtoll(word, &endptr, 0);
+	int64_t arg = strtoll(word, &endptr, 0);
 	if (errno == 0) {
 		out[0] = arg;
 		printf("Arg is %lu\n", arg);
@@ -62,7 +65,7 @@ gboolean garray_strtoull(GArray *words, int idx, uint64_t *out) {
 }
 
 
-gboolean garray_streq(char *ref, GArray* words, int idx) {
+gboolean garray_streq(char *ref, GArray* words, guint idx) {
 	char *word = garray_getstr(words, idx);
 	return 0 == strcmp(word, ref);
 }
