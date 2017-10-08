@@ -3,8 +3,8 @@
 #include <memory.h>
 
 #include <GL/glew.h>
-#include <GLFW/glfw3.h>
 
+#define UNUSED(x) (void)(x)
 typedef GLfloat sample_t;
 
 struct gloscope_color {
@@ -19,13 +19,13 @@ struct gloscope_plot {
 	struct gloscope_color color;
 	sample_t *vert_data;
 	sample_t *horz_data;
+	float tform[16];
 };
 
 struct gloscope_private {
 	GLuint programID;
 	GLuint horz_vbo;
 	GLuint vert_vbo;
-	GLFWwindow* window;
 };
 
 struct gloscope_context {
@@ -38,7 +38,7 @@ struct gloscope_context {
 };
 
 int gloscope_init(struct gloscope_context *, int, GLuint);
-int gloscope_render(struct gloscope_context *);
+void gloscope_render(struct gloscope_context *);
 void gloscope_reshape(struct gloscope_context *, int, GLuint);
 void *notnull(void *);
 void *zalloc(size_t);

@@ -3,7 +3,7 @@
 const char *VertexShaderCode = "#version 440 core\n"
 		"layout(location =   0) in      float a_hpos;\n"
 		"layout(location =   1) in      float a_vpos;\n"
-		"layout(location = 100) out     vec2  v_pos;\n"
+		"layout(location =  10) out     vec2  v_pos;\n"
 		"layout(location = 201) uniform mat4 u_tform = mat4(1);\n"
 		"void main() {\n"
 		"  v_pos = vec2(a_hpos, a_vpos);\n"
@@ -12,7 +12,7 @@ const char *VertexShaderCode = "#version 440 core\n"
 
 
 const char *FragmentShaderCode = "#version 440 core\n"
-		"layout(location = 100) in      vec2 v_pos;\n"
+		"layout(location =  10) in      vec2 v_pos;\n"
 		"layout(location = 200) uniform vec4 u_color = vec4(1,1,1,1);\n"
 		"out vec3 color;\n"
 		"void main() {\n"
@@ -149,6 +149,10 @@ struct gloscope_plot *gloscope_plot_alloc(GLuint num_samples) {
 	res->color.r = 1;
 	res->color.g = 1;
 	res->color.b = 1;
+	res->tform[0] = 1.f;
+	res->tform[5] = 1.f;
+	res->tform[10] = 1.f;
+	res->tform[15] = 1.f;
 	return res;
 }
 
@@ -187,7 +191,7 @@ void gloscope_reshape(struct gloscope_context *ctx, int num_channels
 
 			GLfloat horzScale = 1.f / (num_samples-1);
 			plot->color = default_colors[i % 16];
-			for (int j = 0; j < num_samples; j++) {
+			for (unsigned int j = 0; j < num_samples; j++) {
 				plot->horz_data[j] = j * horzScale;
 			}
 		}
@@ -198,106 +202,78 @@ void gloscope_reshape(struct gloscope_context *ctx, int num_channels
 int gloscope_init(struct gloscope_context *ctx,
 		int num_channels, GLuint num_samples) {
 	memset(ctx, 0, sizeof(*ctx));
-	GLuint VertexArrayID1;
-	GLuint VertexArrayID;
-
-	// Initialise GLFW
-	if(!glfwInit())
-	{
-		fprintf( stderr, "Failed to initialize GLFW\n" );
-		return -1;
-	}
+	GLuint vertVboID;
+	GLuint horzVboID;
 
 	gloscope_reshape(ctx, num_channels, num_samples);
 
-	glfwWindowHint(GLFW_SAMPLES, 4); // 4x antialiasing
-	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4); // We want OpenGL 4.4
-	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 4);
-	// To make MacOS happy; should not be needed
-	glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
-	// We don't want the old OpenGL 
-	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-
-	// Open a window and create its OpenGL context
-	ctx->_p.window = notnull(glfwCreateWindow( 1024, 768, "gloscope", NULL, NULL));
-	glfwMakeContextCurrent(ctx->_p.window); // Initialize GLEW
-	//glewExperimental=1; // Needed in core profile
+	// Initialize GLEW
 	if (glewInit() != GLEW_OK) {
 		fprintf(stderr, "Failed to initialize GLEW\n");
-		return -1;
+		//return -1;
 	}
 
-	glGenVertexArrays(1, &VertexArrayID);
-	glBindVertexArray(VertexArrayID);
+	glGenVertexArrays(1, &horzVboID);
+	glBindVertexArray(horzVboID);
 	glGenBuffers(1, &ctx->_p.horz_vbo);
 
-	glGenVertexArrays(1, &VertexArrayID1);
-	glBindVertexArray(VertexArrayID1);
+	glGenVertexArrays(1, &vertVboID);
+	glBindVertexArray(vertVboID);
 	glGenBuffers(1, &ctx->_p.vert_vbo);
+
+	handleGlError();
 
 	// Create shader program
 	ctx->_p.programID = LoadShaders();
-
-	// Ensure we can capture the escape key being pressed below
-	glfwSetInputMode(ctx->_p.window, GLFW_STICKY_KEYS, GL_TRUE);
 	ctx->ready = 1;
-	
+
 	return 1;
 }
 
-int gloscope_render(struct gloscope_context *ctx) {
+
+void render_plot(struct gloscope_private *p, const struct gloscope_plot *plot
+		, unsigned int start_idx, unsigned int stop_idx) {
+	if (stop_idx >= plot->num_samples)
+			stop_idx = plot->num_samples-1;
+	int num_samples = 1 + stop_idx - start_idx;
+	GLsizeiptr size = num_samples * sizeof(sample_t);
+	GLsizeiptr offset = start_idx * sizeof(sample_t);
+
+	const struct gloscope_color *color = &plot->color;
+	glUniform4f(200, color->r, color->g, color->b, color->a);
+	glUniformMatrix4fv(201, 1, 0, plot->tform);
+
+	glEnableVertexAttribArray(0);
+	glBindBuffer(GL_ARRAY_BUFFER, (*p).horz_vbo);
+	glBufferData(GL_ARRAY_BUFFER, size,
+				plot->horz_data + offset, GL_STATIC_DRAW);
+	glVertexAttribPointer(0, 1, GL_FLOAT, GL_FALSE, 0, (void*)0);
+
+	glEnableVertexAttribArray(1);
+	glBindBuffer(GL_ARRAY_BUFFER, (*p).vert_vbo);
+	glBufferData(GL_ARRAY_BUFFER, size,
+				plot->vert_data + offset, GL_STATIC_DRAW);
+	glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, 0, (void*)0);
+
+	glDrawArrays(GL_LINE_STRIP, 0, plot->num_samples);
+
+	glDisableVertexAttribArray(0);
+	glDisableVertexAttribArray(1);
+}
+
+
+void gloscope_render(struct gloscope_context *ctx) {
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 	glUseProgram(ctx->_p.programID);
-
-	float tform[] = {
-			1.f, 0.f, 0.f, 0.f,
-			0.f, 3.f, 0.f, 0.f,
-			0.f, 0.f, 1.f, 0.f,
-			0.f, 0.f, 0.f, 1.f,
-	};
 
 	for (int c = 0; c < ctx->num_channels; c++) {
 		struct gloscope_plot *plot;
 		plot = ctx->plots[c];
-
+		int start_idx = ctx->start_idx;
 		int stop_idx = ctx->stop_idx;
-		if (stop_idx >= plot->num_samples)
-			stop_idx = plot->num_samples-1;
-		int num_samples = 1 + stop_idx - ctx->start_idx;
-		GLsizeiptr size = num_samples * sizeof(sample_t);
-		GLsizeiptr offset = (ctx->start_idx) * sizeof(sample_t);
 
-		struct gloscope_color *color = &plot->color;
-		glUniform4f(200, color->r, color->g, color->b, color->a);
-		glUniformMatrix4fv(201, 1, 0, tform);
-
-		glEnableVertexAttribArray(0);
-		glBindBuffer(GL_ARRAY_BUFFER, ctx->_p.horz_vbo);
-		glBufferData(GL_ARRAY_BUFFER, size,
-				plot->horz_data + offset, GL_STATIC_DRAW);
-		glVertexAttribPointer(0, 1, GL_FLOAT, GL_FALSE, 0, (void*)0);
-
-		glEnableVertexAttribArray(1);
-		glBindBuffer(GL_ARRAY_BUFFER, ctx->_p.vert_vbo);
-		glBufferData(GL_ARRAY_BUFFER, size,
-				plot->vert_data + offset, GL_STATIC_DRAW);
-		glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, 0, (void*)0);
-
-		glDrawArrays(GL_LINE_STRIP, 0, plot->num_samples);
-
-		glDisableVertexAttribArray(0);
-		glDisableVertexAttribArray(1);
+		render_plot(&ctx->_p, plot, start_idx, stop_idx);
 	}
-
-	// Swap buffers
-	glfwSwapBuffers(ctx->_p.window);
-	glfwPollEvents();
 	handleGlError();
-
-	// Check if the ESC key was pressed or the window was closed
-	int shouldClose = glfwWindowShouldClose(ctx->_p.window);
-	int isEscapePressed = glfwGetKey(ctx->_p.window, GLFW_KEY_ESCAPE) == GLFW_PRESS;
-
-	return shouldClose || isEscapePressed;
 }
 

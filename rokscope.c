@@ -13,15 +13,24 @@ void assert_sr(int ret, const char *string) {
 const char *configkey_tostring(int option) {
 	const char *option_name;
 	switch (option) {
-		case SR_CONF_LOGIC_ANALYZER: option_name = "Logic Analyzer"; break;
-		case SR_CONF_OSCILLOSCOPE:   option_name = "Oscilloscope"; break;
-		case SR_CONF_CONN:           option_name = "Connection"; break;
-		case SR_CONF_SAMPLERATE:     option_name = "Sample Rate"; break;
-		case SR_CONF_VDIV:           option_name = "Volts/Div"; break;
-		case SR_CONF_COUPLING:       option_name = "Coupling"; break;
-		case SR_CONF_NUM_VDIV:       option_name = "Number of Vertical Divisions"; break;
-		case SR_CONF_LIMIT_MSEC:     option_name = "Sample Time Limit (ms)"; break;
-		case SR_CONF_LIMIT_SAMPLES:  option_name = "Sample Number Limit"; break;
+		case SR_CONF_LOGIC_ANALYZER:
+			option_name = "Logic Analyzer"; break;
+		case SR_CONF_OSCILLOSCOPE:
+			option_name = "Oscilloscope"; break;
+		case SR_CONF_CONN:
+			option_name = "Connection"; break;
+		case SR_CONF_SAMPLERATE:
+			option_name = "Sample Rate"; break;
+		case SR_CONF_VDIV:
+			option_name = "Volts/Div"; break;
+		case SR_CONF_COUPLING:
+			option_name = "Coupling"; break;
+		case SR_CONF_NUM_VDIV:
+			option_name = "Number of Vertical Divisions"; break;
+		case SR_CONF_LIMIT_MSEC:
+			option_name = "Sample Time Limit (ms)"; break;
+		case SR_CONF_LIMIT_SAMPLES:
+			option_name = "Sample Number Limit"; break;
 		default: option_name = NULL;
 	}
 	return option_name;
@@ -112,7 +121,7 @@ struct sr_channel** get_device_channels(struct sr_dev_inst *dev, int *num) {
 		struct sr_channel *channel;
 		channel = ch_list->data;
 		channels[i++] = channel;
-		assert_sr( sr_dev_channel_enable(channel, TRUE), "enabling channel");
+		assert_sr(sr_dev_channel_enable(channel, TRUE), "enabling channel");
 	}
 	channels[ch_count] = NULL;
 	num[0] = ch_count;
@@ -185,7 +194,7 @@ int find_falling_edge(float level, float *samples, int num_samples) {
 
 
 void push_buffers(struct state *s) {
-	if (!s->gloscope->ready)
+	if (s->gloscope == NULL || !s->gloscope->ready)
 		return;
 
 	int maxpos = 0;
@@ -196,19 +205,22 @@ void push_buffers(struct state *s) {
 	float *trigger_buff = s->buffers[trigger_channel] + skip;
 	int trigchan_pos = s->positions[trigger_channel] - skip;
 
+	int trig = 0;
 	if (s->trigger_mode == TRIGGER_RISING) {
-		skip += find_rising_edge(s->trigger_level, trigger_buff, trigchan_pos);
+		trig = find_rising_edge(s->trigger_level, trigger_buff, trigchan_pos);
 	} else if (s->trigger_mode == TRIGGER_FALLING) {
-		skip += find_falling_edge(s->trigger_level, trigger_buff, trigchan_pos);
+		trig = find_falling_edge(s->trigger_level, trigger_buff, trigchan_pos);
 	}
+	skip += trig;
 
 	for (int c = 0; c < s->num_channels; c++) {
 		struct gloscope_plot *plot = s->gloscope->plots[c];
-		size_t plot_size = (size_t) plot->num_samples;
+		int plot_size = plot->num_samples;
 		int end = s->positions[c];
 		int count = end - skip;
-		size_t size = plot_size > count ? count : plot_size;
-		memcpy(plot->vert_data, s->buffers[c] + skip, size * sizeof(sample_t));
+		int size = plot_size > count ? count : plot_size;
+		if (size > 0)
+			memcpy(plot->vert_data, s->buffers[c] + skip, size * sizeof(sample_t));
 		if (maxpos < count)
 			maxpos = count;
 		s->positions[c] = 0;
@@ -224,7 +236,7 @@ void on_session_stopped(void *data) {
 	struct state *s = data;
 	s->buff_idx++;
 	if (s->running)
-		assert_sr( sr_session_start(s->session), "starting session");
+		assert_sr(sr_session_start(s->session), "starting session");
 	push_buffers(s);
 }
 
@@ -329,88 +341,94 @@ void on_stdin_read(GObject *src, GAsyncResult *res, void *data) {
 }
 
 
-void *start_render_thread(void *data) {
-	struct state *s = data;
-	
-	struct gloscope_context *ctx;
-	ctx = malloc(sizeof(*ctx));
-	s->gloscope = ctx;
-	ctx->ready = 0;
-	gloscope_init(s->gloscope, s->num_channels, 1024);
-	int e;
-	do {
-		e = gloscope_render(ctx);
-	} while (!e);
+void application_startup(GApplication *application, gpointer user_data) {
+	UNUSED(application);
+	struct state *s = user_data;
+	int ret;
 
-	exit(0);
-	return NULL;
+	s->context = NULL;
+	assert_sr(sr_init(&s->context), "initializing libsigrok");
+
+	s->driver = get_driver("hantek-6xxx", s->context);
+	//s.driver = get_driver("demo", s.context);
+	enumerate_device_options("Driver", s->driver, NULL, NULL);
+
+	s->device = get_device(s->driver);
+	enumerate_device_options("Device", s->driver, s->device, NULL);
+	assert_sr(sr_dev_open(s->device), "opening device");
+
+	s->num_channel_groups = get_device_channel_groups(s->device, &s->chgroups);
+	for (int i = 0; i < s->num_channel_groups; i++)
+		enumerate_device_options("Channel group", s->driver, s->device, s->chgroups[i]);
+	s->channels = get_device_channels(s->device, &s->num_channels);
+	s->positions = zalloc(s->num_channels * sizeof(int));
+	s->buffers = zalloc(s->num_channels * sizeof(*s->buffers));
+
+	cmd_set_samplerate(s, 100000);
+	cmd_set_sampleslimit(s, 4096);
+	cmd_set_skip(s, 512);
+
+	cmd_set_triggerlevel(s, .1f);
+	cmd_set_triggermode(s, TRIGGER_RISING);
+	cmd_set_voltsperdiv(s, 0, 100, 1000);
+	cmd_set_voltsperdiv(s, 1, 100, 1000);
+
+	s->session = NULL;
+	assert_sr(sr_session_new(s->context, &s->session), "creating session");
+	assert_sr(sr_session_dev_add(s->session, s->device),
+			"adding device to session");
+
+	ret = sr_session_datafeed_callback_add(s->session, on_session_datafeed, s);
+	assert_sr(ret, "adding callback for session datafeed");
+
+	ret = sr_session_stopped_callback_set(s->session, on_session_stopped, s);
+	assert_sr(ret, "setting callback for session stopped");
 }
 
 
-int main(int argc, char **argv) {
-	UNUSED(argc);
-	UNUSED(argv);
+gint application_command_line(GtkApplication *application,
+		GApplicationCommandLine *cmdline, gpointer user_data) {
+	UNUSED(application);
+	struct state *s = user_data;
 
-	struct state s;
-	memset(&s, 0, sizeof(s));
-	int ret;
+	s->running = TRUE;
+	s->gui = gui_create(s);
+	assert_sr(sr_session_start(s->session), "starting session");
 
-	GMainLoop *main_loop;
-	main_loop = g_main_loop_new(NULL, FALSE);
+	GInputStream *input = g_application_command_line_get_stdin(cmdline);
+	g_input_stream_read_async(input, s->stdin_buff, 80, G_PRIORITY_DEFAULT,
+			NULL, on_stdin_read, s);
 
-	GInputStream *input;
-	input = g_unix_input_stream_new(0, FALSE);
-	g_input_stream_read_async(input, s.stdin_buff, 80, G_PRIORITY_DEFAULT,
-			NULL, on_stdin_read, &s);
-
-	s.context = NULL;
-	assert_sr( sr_init(&s.context), "initializing libsigrok");
-
-	s.driver = get_driver("hantek-6xxx", s.context);
-	//s.driver = get_driver("demo", s.context);
-	enumerate_device_options("Driver", s.driver, NULL, NULL);
-
-	s.device = get_device(s.driver);
-	enumerate_device_options("Device", s.driver, s.device, NULL);
-	assert_sr( sr_dev_open(s.device), "opening device");
-
-	s.num_channel_groups = get_device_channel_groups(s.device, &s.chgroups);
-	for (int i = 0; i < s.num_channel_groups; i++)
-		enumerate_device_options("Channel group", s.driver, s.device, s.chgroups[i]);
-	s.channels = get_device_channels(s.device, &s.num_channels);
-	s.positions = zalloc(s.num_channels * sizeof(int));
-	s.buffers = zalloc(s.num_channels * sizeof(*s.buffers));
-
-	cmd_set_samplerate(&s, 100000);
-	cmd_set_sampleslimit(&s, 4096);
-
-	cmd_set_triggerlevel(&s, .1f);
-	cmd_set_triggermode(&s, TRIGGER_RISING);
-	cmd_set_voltsperdiv(&s, 0, 100, 1000);
-	cmd_set_voltsperdiv(&s, 1, 100, 1000);
-
-	s.session = NULL;
-	assert_sr( sr_session_new(s.context, &s.session), "creating session");
-	assert_sr( sr_session_dev_add(s.session, s.device),
-			"adding device to session");
-
-	ret = sr_session_datafeed_callback_add(s.session, on_session_datafeed, &s);
-	assert_sr( ret, "adding callback for session datafeed");
-
-	ret = sr_session_stopped_callback_set(s.session, on_session_stopped, &s);
-	assert_sr( ret, "setting callback for session stopped");
-
-	s.rthread = g_thread_new("renderer", start_render_thread, &s);
-
-	s.running = TRUE;
-	assert_sr( sr_session_start(s.session), "starting session");
-	g_main_loop_run(main_loop);
-
-	assert_sr( sr_session_destroy(s.session), "destroying session");
-	assert_sr( sr_dev_close(s.device), "closing device");
-	assert_sr( sr_exit(s.context), "shutting down libsigrok");
+	//g_application_hold(G_APPLICATION(application));
 
 	return 0;
 }
 
 
+void application_shutdown(GApplication *application, gpointer user_data) {
+	UNUSED(application);
+	struct state *s = user_data;
+
+	assert_sr(sr_session_stop(s->session), "stopping session");
+	assert_sr(sr_session_run(s->session), "running session");
+	assert_sr(sr_session_destroy(s->session), "destroying session");
+	assert_sr(sr_dev_close(s->device), "closing device");
+	assert_sr(sr_exit(s->context), "shutting down libsigrok");
+}
+
+
+int main(int argc, char **argv) {
+	struct state *s = zalloc(sizeof(struct state));
+	memset(s, 0, sizeof(*s));
+	s->application = gtk_application_new(NULL,
+			G_APPLICATION_HANDLES_COMMAND_LINE);
+
+	g_signal_connect(s->application, "startup",
+			(GCallback) application_startup, s);
+	g_signal_connect(s->application, "command-line",
+			(GCallback) application_command_line, s);
+	g_signal_connect(s->application, "shutdown",
+			(GCallback) application_shutdown, s);
+
+	return g_application_run((GApplication *) s->application, argc, argv);
+}

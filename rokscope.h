@@ -2,17 +2,20 @@
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <gtk/gtk.h>
 #include <libsigrok/libsigrok.h>
 #include <gio/gunixinputstream.h>
 #include "gloscope.h"
 
-#define UNUSED(x) (void)(x)
 #define STDIN_BUFF_SIZE 80
+
 #define TRIGGER_NONE 0
 #define TRIGGER_RISING 1
 #define TRIGGER_FALLING 2
 
 struct state {
+	GtkApplication *application;
+	GtkWindow *gui;
 	char stdin_buff[STDIN_BUFF_SIZE];
 	uint32_t buff_idx;
 	GThread *rthread;
@@ -43,6 +46,7 @@ typedef struct state state_t;
 
 void assert_sr(int, const char *);
 void parse_command(state_t *, char *);
+GtkWindow *gui_create(state_t *);
 
 void cmd_set_samplerate(state_t *, uint64_t);
 void cmd_set_sampleslimit(state_t *, uint64_t);
